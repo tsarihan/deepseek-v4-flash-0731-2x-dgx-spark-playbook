@@ -3,14 +3,23 @@
 Serving `deepseek-ai/DeepSeek-V4-Flash-0731` at its full **1M-token context** across two
 DGX Sparks with tensor parallelism, DSpark speculative decoding, and an NVFP4 KV cache.
 
+**It works.** 1M context, ~41 tok/s single-stream, ~175 tok/s aggregate at 32 concurrent
+streams, stable across repeated soak testing. Quickstart is below; benchmarks under
+["What to expect"](#what-to-expect-performance-at-a-glance).
+
 This is a **findings-and-delta** repo, not a fork. The launcher and compose stack come from
 [MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark)
-(MIT). What is added here: a small patch to make parallelism configurable, systemd units with
-a watchdog, measurement harnesses, and a set of results that answer questions the upstream
-recipe leaves open — most importantly **why pipeline parallelism cannot work for this model**
-and **why DSpark speculative decoding is unsafe for unattended multi-user serving**.
+(MIT). What is added here: a patch making parallelism configurable, systemd units with a
+watchdog, measurement harnesses, and results answering questions the upstream recipe leaves
+open — most importantly **why pipeline parallelism cannot work for this model** and **why the
+speculative-decoding defaults crash the engine**.
 
-Every number below was measured on the hardware described, not estimated.
+Every number here was measured on the hardware described, not estimated. Where we published
+something and later proved it wrong, the correction is marked rather than quietly edited.
+
+> 📖 **[The journey](docs/JOURNEY.md)** — what we tried, what broke, what fixed it, and the
+> two conclusions we got publicly wrong before finding the real cause. Read that if you want
+> the reasoning; read below if you just want it running.
 
 ## Sources and provenance
 
