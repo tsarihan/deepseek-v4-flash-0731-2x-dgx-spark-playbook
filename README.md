@@ -140,6 +140,26 @@ compressor kernel's 16-element alignment requirement.
 > run killed the engine at **8** streams. Do not treat any concurrency above 1 as safe with
 > DSpark enabled.
 
+**What is actually documented upstream** — worth knowing before you pick a number, because
+the figures circulating are easy to misapply:
+
+| source | concurrency | applies to |
+|---|---:|---|
+| Unpatched DSpark | **1** | documented hard limit — the draft path "stalls under `max_num_seqs>1`" |
+| [Keys concurrency patch](https://github.com/drowzeys/Keys-Concurrency-Patch-for-DSpark-DeepSeek-V4-Flash) | **16** | per 2-Spark stack (TP=2) — 290 tok/s static, 191 staggered |
+| Keys patch | **32** | **two stacks = 4 Sparks** (16+16), ~375 tok/s |
+| **Anemll `0.1.1` (this recipe)** | **unvalidated** | different DSpark implementation — see below |
+
+The widely-quoted "32" is a **4-Spark** number. On a 2-Spark pair the documented figure is 16,
+and only with the Keys patch.
+
+**That validation does not transfer to the image this recipe uses.** Anemll `0.1.1` ships a
+rewritten DSpark (`vllm/v1/worker/gpu/spec_decode/dspark/speculator.py`, subclassing
+`DFlashSpeculator`) rather than the `dspark_proposer.py` the Keys patch targets — the patch's
+symbols (`_req_id_to_slot`, `_store_main_kv_ragged`) are absent from the image. So the draft
+path here has no published concurrency validation at any value above 1, and our own testing
+found it unstable.
+
 The engine dies with `EngineDeadError`. In every crash the scheduler dump shows the drafter
 emitting invalid draft token ids — `[-1, -1, -1, -1, -1]` — on a step that mixes prefill and
 decode work. `sample_tokens` then wedges until the RPC times out:
@@ -166,9 +186,12 @@ that run B never reached.
 
 **Practical guidance:**
 
-- **Speculation on** → excellent single-stream speed (~47 tok/s, 1.9× faster), but the engine
-  can die at any concurrency above 1. Fine for a single interactive user; **not safe for
-  unattended multi-user serving**. Run the watchdog in `systemd/`.
+- **Speculation on, 1 stream** → the only combination with documented support *and* clean
+  results here. ~47 tok/s, 1.9× faster than spec-off. Ideal for a single interactive user.
+- **Speculation on, >1 stream** → unvalidated on this image and observed to kill the engine at
+  8 and at 48. If you try it anyway, run the watchdog in `systemd/` and expect restarts. If
+  you want the documented 16-stream lane, you need the Stage-C build plus the Keys patch, not
+  the Anemll image.
 - **Speculation off** (`SPEC_DECODE=off`) → the only configuration that completed a full
   1→48-stream sweep without incident, at ~40% lower throughput.
 
