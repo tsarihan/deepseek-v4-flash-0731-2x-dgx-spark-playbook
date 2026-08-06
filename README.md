@@ -14,6 +14,47 @@ Every number below was measured on the hardware described, not estimated.
 
 ---
 
+## What to expect (performance at a glance)
+
+Recommended config — **TP=2, DSpark on, `max_num_seqs=32`, 1M context**. Long-answer prompt,
+1024 output tokens per stream, distinct prompt per stream, warmup discarded.
+
+| concurrent streams | TTFT (p50) | per-stream tok/s | **aggregate tok/s** | wall time |
+|---:|---:|---:|---:|---:|
+| 1 | 0.28 s | 47.3 | 46.8 | 22 s |
+| 4 | 1.55 s | 26.0 | 98.4 | 42 s |
+| 8 | 0.77 s | 18.3 | 140.3 | 58 s |
+| 16 | 10.61 s ⚠ | 13.6 | 187.5 | 87 s |
+| 32 | 1.04 s | 13.5 | **229.5** | 143 s |
+| 48 | — | — | **engine dies** (see Finding #2) | — |
+
+Same box with speculation **off** — slower everywhere, but 48 streams work:
+
+| streams | 1 | 4 | 8 | 16 | 32 | 48 |
+|---|---:|---:|---:|---:|---:|---:|
+| per-stream tok/s | 24.7 | 17.1 | 13.0 | 9.6 | 9.4 | 8.0 |
+| aggregate tok/s | 24.5 | 64.0 | 94.2 | 145.6 | 159.0 | 189.8 |
+
+**How to read this:**
+
+- **One user gets ~47 tok/s.** That is the interactive experience on a single stream.
+- **Throughput scales sublinearly, as expected** — 32× the load yields ~4.9× the aggregate
+  (46.8 → 229.5 tok/s) while per-stream drops 47.3 → 13.5 tok/s as the batch shares two GPUs.
+- **32 streams is the throughput ceiling *and* the optimum.** Spec-on @ 32 (229.5 tok/s) beats
+  spec-off @ 48 (189.8), so there is no configuration here that does better by going wider.
+- **Speculation is free performance: 1.4–1.9× at every level, never inverting.** Turn it off
+  only if you need more than 32 concurrent streams.
+- ⚠ **The 16-stream TTFT is an artifact, not a scaling wall.** Triton/CuTeDSL kernels were
+  still JIT-compiling *during* inference because one warmup pass did not cover every batch
+  shape. Throughput columns are unaffected — they measure the decode window after the first
+  token. Expect ~1 s TTFT there in steady state, in line with the 8- and 32-stream figures.
+
+Long context, measured separately: a **130,029-token** prompt prefills in **71 s**
+(1,831 tok/s) and correctly retrieves a needle buried at 50% depth. A full 1M-token prefill
+takes roughly **17–19 minutes** — see Finding #6 before pointing a client at it.
+
+---
+
 ## Hardware / software this was validated on
 
 | | |
@@ -101,6 +142,8 @@ SchedulerStats(num_running_reqs=24, kv_cache_usage=0.0762...)
 With `SPEC_DECODE=off`, 48 streams run fine. The drafter is the ceiling.
 
 ### 3. Speculation is a 1.4–1.9× win and never inverts
+
+Headline numbers are in "What to expect" above; this is the full A/B with speedup ratios.
 
 Expected wisdom is that speculation stops paying once the batch saturates the GPUs. It does
 not here — measured at every level, same hardware, same prompts, only `SPEC_DECODE` differing:
