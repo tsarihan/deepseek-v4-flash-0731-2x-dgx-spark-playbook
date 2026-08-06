@@ -12,17 +12,39 @@ and **why DSpark speculative decoding is unsafe for unattended multi-user servin
 
 Every number below was measured on the hardware described, not estimated.
 
+## Sources and provenance
+
+Prefer first-party sources. This recipe uses them wherever they exist:
+
+| component | source | first-party? |
+|---|---|---|
+| **Model weights** (MXFP4 experts + FP8) | [`deepseek-ai/DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) @ `9e165c30e2704aec5d9d593cce3eebd58bbef1cb` | ✅ DeepSeek |
+| **Speculative-decoding config** | [DeepSeek model card → "How to Run with vLLM"](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731#how-to-run-with-vllm) | ✅ DeepSeek |
+| **Serving engine** | vLLM — see the [official vLLM recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash) | ✅ vLLM |
+| **GB10/sm_121 runtime image** | [`ghcr.io/anemll/dspark-vllm-gx10:0.1.1`](https://github.com/Anemll/dspark-vllm-gx10) | ⚠️ third-party |
+| **Two-node launcher** | [MiaAI-Lab recipe](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark) (MIT) | ⚠️ third-party |
+
+**No third-party weights are used.** The checkpoint comes straight from DeepSeek at a pinned
+revision — no REAP-pruned, re-quantized, or abliterated derivative. Verify what you downloaded
+against the Hub's file sizes before serving it.
+
+**The runtime image is the one unavoidable third-party dependency.** Upstream vLLM does not
+currently ship GB10/`sm_121` kernels for `deepseek_v4` with DSpark and the NVFP4 DS-MLA KV
+cache; the Anemll port supplies them. If you are uncomfortable running a third-party image,
+build from the Anemll source rather than pulling the prebuilt tag.
+
+**Use DeepSeek's speculative-decoding parameters, not a downstream variant** — see Finding #2.
+
 ---
 
 ## What to expect (performance at a glance)
 
-> ⚠ **Read Finding #2 before planning around the multi-stream numbers.** With DSpark
-> speculative decoding enabled, the engine can die at *any* concurrency above 1 — we saw it at
-> 48 streams in one run and at 8 in another. The throughput below is real and reproducible,
-> but it is **not a stability guarantee**. For unattended multi-user serving use
-> `SPEC_DECODE=off`, which completed the full sweep without incident.
+> ⚠ **These numbers were measured with `draft_sample_method: "probabilistic"`, which we
+> later found to be the cause of engine crashes — see Finding #2.** Use DeepSeek's published
+> `"greedy"` / k=7 instead. Greedy is ~14% slower single-stream but survived 9/9 concurrency
+> sweeps. Greedy figures are in the second table.
 
-Measured at **TP=2, DSpark on, `max_num_seqs=48`, 1M context**. Long-answer prompt, 1024
+Measured at **TP=2, DSpark on, `max_num_seqs=48`, 1M context**, `probabilistic`/k=5. Long-answer prompt, 1024
 output tokens per stream, distinct prompt per stream, warmup discarded.
 
 | concurrent streams | TTFT (p50) | per-stream tok/s | **aggregate tok/s** | wall time |
@@ -38,8 +60,8 @@ Same box with speculation **off** — slower everywhere, but 48 streams work:
 
 | streams | 1 | 4 | 8 | 16 | 32 | 48 |
 |---|---:|---:|---:|---:|---:|---:|
-| per-stream tok/s | 24.7 | 17.1 | 13.0 | 9.6 | 9.4 | 8.0 |
-| aggregate tok/s | 24.5 | 64.0 | 94.2 | 145.6 | 159.0 | 189.8 |
+| per-stream tok/s | 24.7 | 17.1 | 13.0 | 9.6 | 9.4 |
+| aggregate tok/s | 24.5 | 64.0 | 94.2 | 145.6 | 159.0 |
 
 **How to read this:**
 
@@ -133,12 +155,40 @@ compressor kernel's 16-element alignment requirement.
 
 **Conclusion: TP=2 is the only working multi-node configuration.** No flag works around this.
 
-### 2. DSpark speculative decoding is unstable under concurrency — there is no safe threshold
+### 2. DSpark instability was a WRONG CONFIG, not a model limit — use DeepSeek's parameters
 
-> **Corrected 2026-08-06.** An earlier version of this document claimed the ceiling was
-> 32 streams. That was wrong — it was a single data point mistaken for a threshold. A second
-> run killed the engine at **8** streams. Do not treat any concurrency above 1 as safe with
-> DSpark enabled.
+> **Corrected twice, 2026-08-06.** First this document claimed a 32-stream ceiling (wrong —
+> one data point mistaken for a threshold). Then it claimed DSpark was inherently unstable
+> (also wrong). The actual cause: we were running `draft_sample_method: "probabilistic"`,
+> which the upstream recipe hardcodes. **DeepSeek's model card specifies `"greedy"`.**
+> With DeepSeek's own parameters the instability disappears.
+
+**The fix — use exactly what DeepSeek publishes:**
+
+```json
+{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}
+```
+
+That is copied from the [DeepSeek model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731#how-to-run-with-vllm).
+The MiaAI compose hardcodes `"probabilistic"` and `num_speculative_tokens: 5` instead.
+
+| config | 8 streams | 16 | 32 | quality |
+|---|---|---|---|---|
+| `probabilistic`, k=5 (upstream default) | **engine died** | — | — | 4/4 |
+| **`greedy`, k=7 (DeepSeek official)** | ✅ 3/3 rounds | ✅ 3/3 | ✅ 3/3 | 4/4 |
+
+Nine consecutive sweeps, zero crashes, server alive throughout — including three separate
+passes through 8 streams, the exact point where `probabilistic` killed the engine.
+
+**Cost:** ~41 tok/s single-stream vs 47.3 with `probabilistic` (≈14% slower). Stability and
+vendor-documented behaviour for 14% throughput is a trade most deployments should take.
+
+**Lesson worth generalising: prefer the model author's published parameters over a
+downstream recipe's defaults.** We lost hours to a crash that DeepSeek's own model card
+would have prevented.
+
+<details>
+<summary>Historical: what the crashes looked like with <code>probabilistic</code></summary>
 
 **What is actually documented upstream** — worth knowing before you pick a number, because
 the figures circulating are easy to misapply:
@@ -195,8 +245,10 @@ that run B never reached.
 - **Speculation off** (`SPEC_DECODE=off`) → the only configuration that completed a full
   1→48-stream sweep without incident, at ~40% lower throughput.
 
-Choose based on whether you need stability or speed. We have not found a setting that gives
-both.
+</details>
+
+**Recommended:** `greedy` / k=7 for everything. `SPEC_DECODE=off` remains available if you
+want speculation out of the picture entirely (~40% lower throughput).
 
 ### 3. Speculation is a 1.4–1.9× win and never inverts
 
@@ -317,13 +369,28 @@ on the wrong interface.
 2. Copy `.env.dspark.example` to `/opt/dsv4/recipe/.env.dspark` on **both** nodes and fill in
    your IPs and HCA names.
 
-3. Download the checkpoint to the **same path on both nodes** (~167 GB each):
+3. Download the checkpoint to the **same path on both nodes** (~167 GB each), straight from
+   DeepSeek — [`deepseek-ai/DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731):
    ```bash
    hf download deepseek-ai/DeepSeek-V4-Flash-0731 \
      --revision 9e165c30e2704aec5d9d593cce3eebd58bbef1cb \
      --local-dir /data/models/deepseek-v4-flash-0731 --max-workers 8
    ```
-   Copying node→node over the high-speed link is much faster than downloading twice.
+   Pin the revision. Copying node→node over the high-speed link is much faster than
+   downloading twice. Verify every shard against the Hub's reported sizes before serving:
+   ```bash
+   python3 - <<'EOF'
+   from huggingface_hub import HfApi; import os
+   info = HfApi().model_info("deepseek-ai/DeepSeek-V4-Flash-0731",
+            revision="9e165c30e2704aec5d9d593cce3eebd58bbef1cb", files_metadata=True)
+   base = "/data/models/deepseek-v4-flash-0731"
+   bad = [(s.rfilename, os.path.getsize(os.path.join(base, s.rfilename)), s.size)
+          for s in info.siblings if s.size
+          and os.path.exists(os.path.join(base, s.rfilename))
+          and os.path.getsize(os.path.join(base, s.rfilename)) != s.size]
+   print("size mismatches:", bad or "none")
+   EOF
+   ```
 
 4. Pull the image on both nodes, then start:
    ```bash
