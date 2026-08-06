@@ -187,4 +187,82 @@ and pull a generic wheel — the build still "succeeds", having discarded the en
 using that base. Strip torch pins from the build requirements, use `--no-deps`, and assert
 afterwards that NVIDIA's torch survived.
 
-*(Build results and benchmarks to follow — this section is updated as the work completes.)*
+### Result: the premise was wrong — sm_120 and sm_121 generate identical code
+
+The build succeeded (`vllm-0.1.dev1+gadc3e0351.cu133`, 24 min, NVIDIA's torch intact), and
+the kernels execute natively on GB10 — verified by running a real vLLM CUDA op on the device:
+
+```
+device: NVIDIA GB10 (12, 1)
+first call:   3.7 ms      (context init, not a PTX JIT stall)
+steady state: 0.005 ms/call
+```
+
+But `cuobjdump` reported the built kernels as **sm_120**, not sm_121 — the same as both
+existing images. That looked like a failure. It is not. Two independent mechanisms make
+`sm_120` code correct on GB10:
+
+1. **Classic cubin compatibility** — a cubin for `X.y` runs on `X.z` where `z >= y`, so an
+   `sm_120` cubin runs on `sm_121`. (The reverse is **not** true: `sm_121` cubins do not run
+   on `sm_120`, so targeting 121 only *narrows* portability.)
+2. **CUDA 13 family targets** — `compute_120f` produces one cubin covering the whole SM12x
+   family. `cuobjdump` labels it by the family base, i.e. `sm_120`.
+
+We then measured whether sm_121-native codegen differs at all. Same PTX, both targets,
+representative kernel (wmma tensor cores + shared memory + block sync):
+
+```
+ptxas -O3 -arch=sm_120 k.ptx -o k120.cubin     10024 bytes
+ptxas -O3 -arch=sm_121 k.ptx -o k121.cubin     10024 bytes
+
+SASS diff, 408 lines:
+  <   code for sm_120        >   code for sm_121
+  <   .target sm_120         >   .target sm_121
+```
+
+**Byte-identical size; the only difference is the architecture label.** All 406 instruction
+lines match — same selection, registers and scheduling.
+
+**Conclusion: there is nothing to gain by building for sm_121.** sm_120 and sm_121 share one
+12.x spec column (99 KB/block shared memory, 48 warps/SM, 64K registers/SM, identical
+tensor-core dtypes, TMA, clusters). The only hardware difference is GB10's unified memory,
+for which no kernel optimizations currently exist. Both prebuilt images were already emitting
+optimal code for this GPU.
+
+### The related concern that also turned out fine
+
+[FlashInfer #3170](https://github.com/flashinfer-ai/flashinfer/issues/3170) documents real
+SM121 gaps — notably the **b12x FP4 backend excluded from auto-selection because heuristics
+check `minor == 0` only**, which is exactly the "sm_121 falls into a slow path" failure mode
+worth worrying about, and b12x is the MoE backend this model uses.
+
+On the versions here it does not apply. Measured on the device:
+
+```
+has_flashinfer_b12x_gemm            True
+has_flashinfer_cutlass_fused_moe    True
+is_device_capability_family(120)    True     # 121 // 10 == 120 // 10
+```
+
+vLLM gates on `is_device_capability_family(120)`, which matches sm_121 by construction, and we
+found **no strict-equality checks** that would exclude it. NVIDIA's FlashInfer 0.6.14 build
+handles SM121 explicitly (`compute_121a`).
+
+### So what is the source build actually worth?
+
+Honest answer, after all of the above: **provenance and freshness, not performance.**
+
+| | gain |
+|---|---|
+| Reproducible from pinned upstream commit on NVIDIA's signed base | ✅ real |
+| Six-weeks-newer DSpark | ✅ possibly |
+| CUDA 13.3 vs the community image's 13.0 | ✅ marginal |
+| "Native sm_121 kernels" | ❌ **no such thing — identical code** |
+| `nvfp4_ds_mla` KV cache | ❌ **lost** — not upstream, halves the KV pool |
+
+If you trust the community image, there is little performance reason to build. If you need
+a reproducible supply chain, the build is worth it — and costs you the NVFP4 KV cache.
+
+**Lesson:** we spent hours building to fix a problem that did not exist, on the assumption
+that a version label implied different machine code. One `ptxas` invocation and a `diff`
+would have answered it up front. Measure the premise before optimising against it.
