@@ -1,0 +1,23 @@
+[Unit]
+Description=LiteLLM gateway (Anthropic /v1/messages + OpenAI) for all lab models
+Documentation=file:///opt/dsv4/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+# Not Requires= : if the gateway also fronts other backends, it stays useful
+# when the local vLLM cluster is down.
+After=deepseek-vllm.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/opt/dsv4
+Environment=HOME=/opt/dsv4
+ExecStart=/opt/dsv4/proxy-env/bin/litellm \
+  --config /opt/dsv4/litellm-config.yaml \
+  --host 0.0.0.0 --port 4000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

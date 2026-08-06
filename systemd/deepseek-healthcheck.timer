@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the deepseek-vllm health probe every 2 minutes
+
+[Timer]
+# Start 10 min after boot so the cluster's ~8 min load is never interrupted.
+OnBootSec=10min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=deepseek-healthcheck.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Health probe for deepseek-vllm.service (restarts a wedged engine)
+After=deepseek-vllm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/deepseek-healthcheck.sh

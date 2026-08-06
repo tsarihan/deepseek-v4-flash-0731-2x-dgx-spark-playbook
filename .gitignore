@@ -1,0 +1,5 @@
+.env.dspark
+*.log
+__pycache__/
+*.json
+!results/*.json

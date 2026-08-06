@@ -1,0 +1,25 @@
+This project builds on the following works.
+
+--------------------------------------------------------------------------------
+MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark
+https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark
+MIT License, Copyright (c) 2026 Tony Deangelo
+
+The two-node launcher, docker-compose stack, and original 2x DGX Spark recipe.
+This repository does NOT redistribute that source. It ships only a patch against
+it (docker-compose.dspark.parallelism.patch) plus independent findings, systemd
+units, and measurement scripts. Clone the upstream repo and apply the patch.
+--------------------------------------------------------------------------------
+Anemll/dspark-vllm-gx10
+https://github.com/Anemll/dspark-vllm-gx10
+
+The GB10 / sm_121 vLLM port used as the runtime image
+(ghcr.io/anemll/dspark-vllm-gx10:0.1.1), providing native DSpark speculative
+decoding, NVFP4 DS-MLA KV cache, and the b12x MoE backend.
+--------------------------------------------------------------------------------
+DeepSeek-AI — DeepSeek-V4-Flash-0731
+https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+MIT License
+
+The model weights. Not redistributed here.
+--------------------------------------------------------------------------------

@@ -1,0 +1,148 @@
+{
+  "hardware": "2x DGX Spark GB10, CX7 200GbE RoCEv2",
+  "image": "ghcr.io/anemll/dspark-vllm-gx10:0.1.1",
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731@9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+  "profile": {
+    "tp": 2,
+    "pp": 1,
+    "max_model_len": 1048576,
+    "max_num_seqs": 48,
+    "max_num_batched_tokens": 8192,
+    "gpu_memory_utilization": 0.8,
+    "mtp_num_tokens": 5,
+    "kv_cache_dtype": "nvfp4_ds_mla"
+  },
+  "method": "long-answer prompt, distinct prompt per stream (defeats prefix caching), max_tokens=1024, warmup discarded",
+  "runs": {
+    "spec_on": [
+      {
+        "concurrency": 1,
+        "success": 1,
+        "failed": 0,
+        "ttft_p50_s": 0.275,
+        "ttft_mean_s": 0.275,
+        "per_stream_decode_tps": 47.31,
+        "aggregate_tps": 46.76,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 4,
+        "success": 4,
+        "failed": 0,
+        "ttft_p50_s": 1.554,
+        "ttft_mean_s": 1.225,
+        "per_stream_decode_tps": 25.95,
+        "aggregate_tps": 98.44,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 8,
+        "success": 8,
+        "failed": 0,
+        "ttft_p50_s": 0.772,
+        "ttft_mean_s": 0.63,
+        "per_stream_decode_tps": 18.33,
+        "aggregate_tps": 140.27,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 16,
+        "success": 16,
+        "failed": 0,
+        "ttft_p50_s": 10.614,
+        "ttft_mean_s": 9.331,
+        "per_stream_decode_tps": 13.64,
+        "aggregate_tps": 187.49,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 32,
+        "success": 32,
+        "failed": 0,
+        "ttft_p50_s": 1.044,
+        "ttft_mean_s": 0.997,
+        "per_stream_decode_tps": 13.46,
+        "aggregate_tps": 229.46,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 48,
+        "success": 0,
+        "failed": 48,
+        "ttft_p50_s": null,
+        "ttft_mean_s": null,
+        "per_stream_decode_tps": null,
+        "aggregate_tps": null,
+        "out_tokens_mean": null
+      }
+    ],
+    "spec_off": [
+      {
+        "concurrency": 1,
+        "success": 1,
+        "failed": 0,
+        "ttft_p50_s": 0.26,
+        "ttft_mean_s": 0.26,
+        "per_stream_decode_tps": 24.67,
+        "aggregate_tps": 24.54,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 4,
+        "success": 4,
+        "failed": 0,
+        "ttft_p50_s": 5.25,
+        "ttft_mean_s": 3.995,
+        "per_stream_decode_tps": 17.08,
+        "aggregate_tps": 64.02,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 8,
+        "success": 8,
+        "failed": 0,
+        "ttft_p50_s": 8.995,
+        "ttft_mean_s": 7.898,
+        "per_stream_decode_tps": 12.95,
+        "aggregate_tps": 94.17,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 16,
+        "success": 16,
+        "failed": 0,
+        "ttft_p50_s": 6.56,
+        "ttft_mean_s": 6.164,
+        "per_stream_decode_tps": 9.62,
+        "aggregate_tps": 145.63,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 32,
+        "success": 32,
+        "failed": 0,
+        "ttft_p50_s": 1.178,
+        "ttft_mean_s": 1.017,
+        "per_stream_decode_tps": 9.35,
+        "aggregate_tps": 159.02,
+        "out_tokens_mean": 1024.0
+      },
+      {
+        "concurrency": 48,
+        "success": 48,
+        "failed": 0,
+        "ttft_p50_s": 1.063,
+        "ttft_mean_s": 1.06,
+        "per_stream_decode_tps": 7.97,
+        "aggregate_tps": 189.83,
+        "out_tokens_mean": 1024.0
+      }
+    ]
+  },
+  "notes": [
+    "spec_on concurrency=48 killed the engine: drafter emitted token ids of -1, sample_tokens RPC timed out. KV cache was only 7.6% used - not a memory limit.",
+    "TTFT at 8 and 16 streams is inflated by Triton/CuTeDSL kernels JIT-compiling during inference; throughput columns are unaffected.",
+    "KV pool: 1,492,215 tokens with speculation vs 2,168,219 without (max_num_seqs=48).",
+    "Graph capture: 58s/2.89GiB with speculation vs 14s/1.14GiB without."
+  ]
+}

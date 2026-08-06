@@ -1,0 +1,34 @@
+[Unit]
+Description=DeepSeek-V4-Flash-0731 vLLM cluster (TP=2 across dgx-spark-1/2)
+Documentation=file:///opt/dsv4/RUNBOOK.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=YOUR_USER
+Group=YOUR_USER
+SupplementaryGroups=docker
+WorkingDirectory=/opt/dsv4/recipe
+Environment=HOME=/opt/dsv4
+
+# The head node drives the worker over SSH on the CX7 link. On a cold boot of the
+# whole rack spark-1 can be ready before spark-2, so wait for it (up to 5 min)
+# rather than failing the unit.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no WORKER_ROCE_IP true >/dev/null 2>&1 && exit 0; sleep 5; done; echo "spark-2 unreachable on WORKER_ROCE_IP" >&2; exit 1'
+
+# start-*.sh refuses to run if containers/port are already in use, so clear any
+# stale state first. Leading "-" means failures here don't fail the unit.
+ExecStartPre=-/opt/dsv4/recipe/stop-deepseek-v4-flash-dspark.sh
+
+ExecStart=/opt/dsv4/recipe/start-deepseek-v4-flash-dspark.sh
+ExecStop=/opt/dsv4/recipe/stop-deepseek-v4-flash-dspark.sh
+
+# 167 GB weight load + CUDA graph capture on both nodes takes ~6 min; allow slack.
+TimeoutStartSec=1800
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target
