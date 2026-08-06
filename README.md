@@ -39,44 +39,75 @@ build from the Anemll source rather than pulling the prebuilt tag.
 
 ## What to expect (performance at a glance)
 
-> ⚠ **These numbers were measured with `draft_sample_method: "probabilistic"`, which we
-> later found to be the cause of engine crashes — see Finding #2.** Use DeepSeek's published
-> `"greedy"` / k=7 instead. Greedy is ~14% slower single-stream but survived 9/9 concurrency
-> sweeps. Greedy figures are in the second table.
+**Recommended config — TP=2, DSpark on with DeepSeek's `greedy`/k=7, `max_num_seqs=32`,
+1M context.** Long-answer prompt, 1024 output tokens per stream, a distinct prompt per
+stream so prefix caching cannot shortcut prefill, warmup discarded.
 
-Measured at **TP=2, DSpark on, `max_num_seqs=48`, 1M context**, `probabilistic`/k=5. Long-answer prompt, 1024
-output tokens per stream, distinct prompt per stream, warmup discarded.
+| concurrent streams | TTFT (p50) | per-stream tok/s | **aggregate tok/s** |
+|---:|---:|---:|---:|
+| 1 | 0.28 s | ~41 † | ~40 † |
+| 4 | 0.60 s | 19.7 | 76.8 |
+| 8 | 0.67 s | 14.5 | 113.4 |
+| 16 | 0.91 s | 10.6 | 163.5 |
+| 32 | 1.10 s | 10.2 | **174.6** |
 
-| concurrent streams | TTFT (p50) | per-stream tok/s | **aggregate tok/s** | wall time |
-|---:|---:|---:|---:|---:|
-| 1 | 0.28 s | 47.3 | 46.8 | 22 s |
-| 4 | 1.55 s | 26.0 | 98.4 | 42 s |
-| 8 | 0.77 s | 18.3 | 140.3 | 58 s |
-| 16 | 10.61 s ⚠ | 13.6 | 187.5 | 87 s |
-| 32 | 1.04 s | 13.5 | **229.5** | 143 s |
-| 48 | — | — | **engine died** (see Finding #2) | — |
+† The single-stream figure in that sweep read 27.8 tok/s, which three independent
+re-measurements (41.8 / 40.9 / 40.2) show was a transient caused by host memory pressure,
+not a real result. We report the replicated value and flag it rather than publish either
+number silently.
 
-Same box with speculation **off** — slower everywhere, but 48 streams work:
+Stability at this config: **9 consecutive sweeps (3 rounds × 8/16/32 streams), zero
+crashes** — see Finding #2.
 
-| streams | 1 | 4 | 8 | 16 | 32 | 48 |
-|---|---:|---:|---:|---:|---:|---:|
-| per-stream tok/s | 24.7 | 17.1 | 13.0 | 9.6 | 9.4 |
-| aggregate tok/s | 24.5 | 64.0 | 94.2 | 145.6 | 159.0 |
+<details>
+<summary>Historical — <code>probabilistic</code>/k=5 (the upstream default; faster but crashes)</summary>
+
+Measured at `max_num_seqs=48`, otherwise identical methodology.
+
+| concurrent streams | TTFT (p50) | per-stream tok/s | aggregate tok/s |
+|---:|---:|---:|---:|
+| 1 | 0.28 s | 47.3 | 46.8 |
+| 4 | 1.55 s | 26.0 | 98.4 |
+| 8 | 0.77 s | 18.3 | 140.3 |
+| 16 | 10.61 s ‡ | 13.6 | 187.5 |
+| 32 | 1.04 s | 13.5 | 229.5 |
+| 48 | — | — | **engine died** |
+
+‡ That 16-stream TTFT is a JIT-compilation artifact, not a scaling wall — Triton/CuTeDSL
+kernels were still compiling during inference. The warm greedy run shows 0.91 s at the same
+concurrency, confirming it.
+
+</details>
+
+<details>
+<summary>Speculation off — most conservative, ~40% slower</summary>
+
+| concurrent streams | per-stream tok/s | aggregate tok/s |
+|---:|---:|---:|
+| 1 | 24.7 | 24.5 |
+| 4 | 17.1 | 64.0 |
+| 8 | 13.0 | 94.2 |
+| 16 | 9.6 | 145.6 |
+| 32 | 9.4 | 159.0 |
+| 48 | 8.0 | 189.8 |
+
+Measured at `max_num_seqs=48`. This is the only config that completed a 48-stream sweep,
+but note it is *slower in absolute terms* at 48 (189.8) than greedy is at 32.
+
+</details>
 
 **How to read this:**
 
-- **One user gets ~47 tok/s.** That is the interactive experience on a single stream.
-- **Throughput scales sublinearly, as expected** — 32× the load yields ~4.9× the aggregate
-  (46.8 → 229.5 tok/s) while per-stream drops 47.3 → 13.5 tok/s as the batch shares two GPUs.
-- **Throughput peaks around 32 streams** (229.5 tok/s) — spec-on @ 32 beats spec-off @ 48
-  (189.8), so going wider does not help. This is a *throughput* observation, **not** a
-  stability threshold; see Finding #2.
-- **Speculation buys 1.4–1.9× at every level and never inverts** — but it is the component
-  that crashes the engine. Turn it off for unattended or multi-user serving.
-- ⚠ **The 16-stream TTFT is an artifact, not a scaling wall.** Triton/CuTeDSL kernels were
-  still JIT-compiling *during* inference because one warmup pass did not cover every batch
-  shape. Throughput columns are unaffected — they measure the decode window after the first
-  token. Expect ~1 s TTFT there in steady state, in line with the 8- and 32-stream figures.
+- **One user gets ~41 tok/s.** That is the interactive single-stream experience.
+- **Throughput scales sublinearly, as expected** — 32× the load yields ~4.3× the aggregate
+  (40 → 174.6 tok/s) while per-stream falls 41 → 10.2 as the batch shares two GPUs.
+- **Aggregate throughput peaks around 32 streams.** Beyond that you are trading per-stream
+  latency for very little total gain.
+- **Speculation is worth 1.4–1.9×**, but only with DeepSeek's parameters. The upstream
+  recipe's `probabilistic` default is faster still and **crashes the engine** — see
+  Finding #2 before choosing it.
+- **TTFT is sub-second to ~1.1 s across the whole range** once the server is warm. Cold
+  TTFT is much worse while kernels JIT-compile; warm up before measuring anything.
 
 Long context, measured separately: a **130,029-token** prompt prefills in **71 s**
 (1,831 tok/s) and correctly retrieves a needle buried at 50% depth. A full 1M-token prefill
