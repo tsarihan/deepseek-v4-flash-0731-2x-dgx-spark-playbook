@@ -21,6 +21,32 @@ something and later proved it wrong, the correction is marked rather than quietl
 > two conclusions we got publicly wrong before finding the real cause. Read that if you want
 > the reasoning; read below if you just want it running.
 
+## Reproducibility — everything is pinned
+
+A repo that works today and fails in two months is worse than no repo. Every artifact here
+is pinned, and `scripts/verify-pins.sh` checks they still resolve before you trust a run:
+
+| artifact | pinned by | value |
+|---|---|---|
+| Model weights | HF revision | `9e165c30e2704aec5d9d593cce3eebd58bbef1cb` |
+| Runtime image | **image digest**, not tag | `sha256:a8394849…464ac9d8` |
+| Python | transitively, via the image digest | 3.12.13 |
+| CUDA | transitively, via the image digest | 13.0.88 |
+| torch / vLLM | transitively, via the image digest | vLLM 0.25.2.dev0 |
+
+**Tags are not pins.** `…:0.1.1` can be re-pushed to different content; a digest cannot.
+The same applies to `main` on a git repo — vLLM lands commits many times per day.
+
+```bash
+./scripts/verify-pins.sh    # exit 0 = every pin verified; non-zero = something moved
+```
+
+Run it before believing anything, especially if this repo has been sitting a while. It
+checks the image digest resolves, that Python and vLLM inside are the expected versions,
+that the model revision still exists upstream, and that your local shards match its sizes.
+
+---
+
 ## Sources and provenance
 
 Prefer first-party sources. This recipe uses them wherever they exist:
@@ -434,7 +460,7 @@ on the wrong interface.
 
 4. Pull the image on both nodes, then start:
    ```bash
-   docker pull ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+   docker pull ghcr.io/anemll/dspark-vllm-gx10@sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8
    cd /opt/dsv4/recipe && ./start-deepseek-v4-flash-dspark.sh
    ```
    Startup is ~6–8 min (167 GB load + CUDA graph capture).
