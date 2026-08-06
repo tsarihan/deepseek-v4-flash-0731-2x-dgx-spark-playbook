@@ -8,7 +8,7 @@ This is a **findings-and-delta** repo, not a fork. The launcher and compose stac
 (MIT). What is added here: a small patch to make parallelism configurable, systemd units with
 a watchdog, measurement harnesses, and a set of results that answer questions the upstream
 recipe leaves open — most importantly **why pipeline parallelism cannot work for this model**
-and **where DSpark's concurrency ceiling actually is**.
+and **why DSpark speculative decoding is unsafe for unattended multi-user serving**.
 
 Every number below was measured on the hardware described, not estimated.
 
@@ -16,8 +16,14 @@ Every number below was measured on the hardware described, not estimated.
 
 ## What to expect (performance at a glance)
 
-Recommended config — **TP=2, DSpark on, `max_num_seqs=32`, 1M context**. Long-answer prompt,
-1024 output tokens per stream, distinct prompt per stream, warmup discarded.
+> ⚠ **Read Finding #2 before planning around the multi-stream numbers.** With DSpark
+> speculative decoding enabled, the engine can die at *any* concurrency above 1 — we saw it at
+> 48 streams in one run and at 8 in another. The throughput below is real and reproducible,
+> but it is **not a stability guarantee**. For unattended multi-user serving use
+> `SPEC_DECODE=off`, which completed the full sweep without incident.
+
+Measured at **TP=2, DSpark on, `max_num_seqs=48`, 1M context**. Long-answer prompt, 1024
+output tokens per stream, distinct prompt per stream, warmup discarded.
 
 | concurrent streams | TTFT (p50) | per-stream tok/s | **aggregate tok/s** | wall time |
 |---:|---:|---:|---:|---:|
@@ -26,7 +32,7 @@ Recommended config — **TP=2, DSpark on, `max_num_seqs=32`, 1M context**. Long-
 | 8 | 0.77 s | 18.3 | 140.3 | 58 s |
 | 16 | 10.61 s ⚠ | 13.6 | 187.5 | 87 s |
 | 32 | 1.04 s | 13.5 | **229.5** | 143 s |
-| 48 | — | — | **engine dies** (see Finding #2) | — |
+| 48 | — | — | **engine died** (see Finding #2) | — |
 
 Same box with speculation **off** — slower everywhere, but 48 streams work:
 
@@ -40,10 +46,11 @@ Same box with speculation **off** — slower everywhere, but 48 streams work:
 - **One user gets ~47 tok/s.** That is the interactive experience on a single stream.
 - **Throughput scales sublinearly, as expected** — 32× the load yields ~4.9× the aggregate
   (46.8 → 229.5 tok/s) while per-stream drops 47.3 → 13.5 tok/s as the batch shares two GPUs.
-- **32 streams is the throughput ceiling *and* the optimum.** Spec-on @ 32 (229.5 tok/s) beats
-  spec-off @ 48 (189.8), so there is no configuration here that does better by going wider.
-- **Speculation is free performance: 1.4–1.9× at every level, never inverting.** Turn it off
-  only if you need more than 32 concurrent streams.
+- **Throughput peaks around 32 streams** (229.5 tok/s) — spec-on @ 32 beats spec-off @ 48
+  (189.8), so going wider does not help. This is a *throughput* observation, **not** a
+  stability threshold; see Finding #2.
+- **Speculation buys 1.4–1.9× at every level and never inverts** — but it is the component
+  that crashes the engine. Turn it off for unattended or multi-user serving.
 - ⚠ **The 16-stream TTFT is an artifact, not a scaling wall.** Triton/CuTeDSL kernels were
   still JIT-compiling *during* inference because one warmup pass did not cover every batch
   shape. Throughput columns are unaffected — they measure the decode window after the first
@@ -126,20 +133,47 @@ compressor kernel's 16-element alignment requirement.
 
 **Conclusion: TP=2 is the only working multi-node configuration.** No flag works around this.
 
-### 2. DSpark speculative decoding caps concurrency at 32 streams
+### 2. DSpark speculative decoding is unstable under concurrency — there is no safe threshold
 
-At 48 concurrent streams the engine dies. The crash dump shows every in-flight request
-carrying draft tokens of `[-1, -1, -1, -1, -1]` — invalid ids — which wedges `sample_tokens`
-until the RPC times out:
+> **Corrected 2026-08-06.** An earlier version of this document claimed the ceiling was
+> 32 streams. That was wrong — it was a single data point mistaken for a threshold. A second
+> run killed the engine at **8** streams. Do not treat any concurrency above 1 as safe with
+> DSpark enabled.
+
+The engine dies with `EngineDeadError`. In every crash the scheduler dump shows the drafter
+emitting invalid draft token ids — `[-1, -1, -1, -1, -1]` — on a step that mixes prefill and
+decode work. `sample_tokens` then wedges until the RPC times out:
 
 ```
 TimeoutError: RPC call to sample_tokens timed out.
-scheduled_spec_decode_tokens={...: [-1,-1,-1,-1,-1], ...}   # all 24 running requests
-SchedulerStats(num_running_reqs=24, kv_cache_usage=0.0762...)
+scheduled_spec_decode_tokens={...: [-1,-1,-1,-1,-1], ...}
 ```
 
-**This is not memory pressure** — the KV cache was 7.6% used and graph capture fit in 2.89 GiB.
-With `SPEC_DECODE=off`, 48 streams run fine. The drafter is the ceiling.
+Two crashes, same signature, very different stream counts:
+
+| run | `max_num_seqs` | survived | **died at** | KV in use | requests carrying `[-1,…]` |
+|---|---:|---|---:|---:|---|
+| A | 48 | 1, 4, 8, 16, 32 | 48 | 7.6% | all 24 running |
+| B | 32 | 1, 4 | **8** | 1.5% | 1 of 8 |
+
+In run B the failing step was 7 new prefills scheduled alongside 1 decoding request — a
+**mixed prefill/decode batch**, which is also what the upstream "Keys concurrency patch"
+notes identify as the fragile path in an older DSpark implementation.
+
+**This is not memory pressure.** KV was 1.5% used in run B and 7.6% in run A; graph capture
+fit in 2.89 GiB. It is not a clean function of stream count either — run A survived 32 streams
+that run B never reached.
+
+**Practical guidance:**
+
+- **Speculation on** → excellent single-stream speed (~47 tok/s, 1.9× faster), but the engine
+  can die at any concurrency above 1. Fine for a single interactive user; **not safe for
+  unattended multi-user serving**. Run the watchdog in `systemd/`.
+- **Speculation off** (`SPEC_DECODE=off`) → the only configuration that completed a full
+  1→48-stream sweep without incident, at ~40% lower throughput.
+
+Choose based on whether you need stability or speed. We have not found a setting that gives
+both.
 
 ### 3. Speculation is a 1.4–1.9× win and never inverts
 
@@ -174,7 +208,7 @@ not here — measured at every level, same hardware, same prompts, only `SPEC_DE
 speculation is strictly worse, so 32 is the throughput optimum, not a compromise.
 
 Cost of speculation is capacity, not quality: KV pool **1.56M vs 2.17M tokens** (−28%), graph
-capture **58 s / 2.89 GiB vs 14 s / 1.14 GiB** (6× the capture set), and the 32-stream ceiling.
+capture **58 s / 2.89 GiB vs 14 s / 1.14 GiB** (6× the capture set), and — more seriously — the instability in Finding #2.
 
 ### 4. Speculation is not an accuracy trade-off
 

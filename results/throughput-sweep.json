@@ -144,5 +144,38 @@
     "TTFT at 8 and 16 streams is inflated by Triton/CuTeDSL kernels JIT-compiling during inference; throughput columns are unaffected.",
     "KV pool: 1,492,215 tokens with speculation vs 2,168,219 without (max_num_seqs=48).",
     "Graph capture: 58s/2.89GiB with speculation vs 14s/1.14GiB without."
-  ]
+  ],
+  "stability": {
+    "summary": "DSpark drafting emits invalid draft token ids ([-1]*k) on mixed prefill/decode steps and kills the engine. No safe concurrency above 1 established.",
+    "crashes": [
+      {
+        "run": "A",
+        "max_num_seqs": 48,
+        "survived": [
+          1,
+          4,
+          8,
+          16,
+          32
+        ],
+        "died_at_concurrency": 48,
+        "kv_cache_usage": 0.0762,
+        "requests_with_invalid_draft": "all 24 running"
+      },
+      {
+        "run": "B",
+        "max_num_seqs": 32,
+        "survived": [
+          1,
+          4
+        ],
+        "died_at_concurrency": 8,
+        "kv_cache_usage": 0.015,
+        "requests_with_invalid_draft": "1 of 8",
+        "batch": "7 new prefills + 1 decoding request (mixed prefill/decode step)"
+      }
+    ],
+    "workaround": "SPEC_DECODE=off completed a full 1->48 sweep without incident."
+  },
+  "correction": "An earlier version of this file and the README claimed a 32-stream ceiling. That was one data point mistaken for a threshold; run B died at 8."
 }
